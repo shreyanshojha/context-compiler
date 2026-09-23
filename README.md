@@ -4,7 +4,20 @@ Automatically compiles the right slice of a repo into context for an AI coding a
 
 ## The 30-second version
 
+**Option A — from npm** (once published as `@shreyanshojha/context-compiler`):
+
 ```bash
+npm install -g @shreyanshojha/context-compiler
+export OPENAI_API_KEY=sk-...
+context-compiler init                       # writes .context-compiler.json + prints an MCP snippet, once
+context-compiler "fix the login bug"        # that's it — no other flags needed
+```
+
+**Option B — from source:**
+
+```bash
+git clone https://github.com/shreyanshojha/context-compiler.git
+cd context-compiler
 npm install          # also builds, via the prepare script
 export OPENAI_API_KEY=sk-...
 node dist/cli.js init                       # writes .context-compiler.json + prints an MCP snippet, once
