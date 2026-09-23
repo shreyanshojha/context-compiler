@@ -1,7 +1,9 @@
 import { describe, it, expect } from "vitest";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { readFileSync } from "node:fs";
 import { chunkFile, splitLines } from "../src/chunker.js";
+import { countTokens } from "../src/budget.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = join(__dirname, "fixtures", "sample-repo");
@@ -162,6 +164,37 @@ describe("chunkFile", () => {
         }
       }
     }
+  });
+
+  it("REGRESSION: caps a chunk's token count even when it's tiny by line count", async () => {
+    // Found via a deliberate repro built to test a gap flagged (but not yet
+    // demonstrated) in TESTING.md's Known Limitations: every splitting
+    // strategy in this file measures size in *lines*, so a file with one
+    // pathologically long line -- a minified bundle, a huge generated
+    // single-line JSON blob -- sails through wholeFileLineThreshold and
+    // windowLines as "small" and comes out as a single giant chunk. A 140KB
+    // two-line version of this fixture produced ONE chunk with over 100,000
+    // tokens in a real test, 12x past OpenAI's 8,192-token embedding limit --
+    // exactly the failure mode that hard-failed a real run in an earlier
+    // round, just via a pathological line instead of a misclassified binary
+    // file. src/hugeSingleLine.ts (one ~19.5KB line, well under any default
+    // line-count threshold) is the fixture; maxChunkTokens is set small here
+    // so the test stays fast regardless of the tokenizer's exact chars-per-
+    // token ratio, not to reflect a real budget.
+    const chunks = await chunkFile(FIXTURE_ROOT, "src/hugeSingleLine.ts", { maxChunkTokens: 50 });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const c of chunks) {
+      expect(countTokens(c.text)).toBeLessThanOrEqual(50);
+    }
+    // Splitting must not lose or duplicate real content. A trailing
+    // whitespace-only fragment can legitimately disappear here -- the
+    // existing dropEmptyChunks pass (see its own doc comment) already
+    // discards any chunk that's nothing but whitespace, same policy as the
+    // Round 6 orphaned-blank-chunk fix, and this file's one line happens to
+    // end in a run of whitespace that can land in its own token slice -- so
+    // the comparison trims both sides rather than demanding a byte-exact join.
+    const original = readFileSync(join(FIXTURE_ROOT, "src/hugeSingleLine.ts"), "utf8");
+    expect(chunks.map((c) => c.text).join("").trim()).toBe(original.trim());
   });
 
   it("falls back to line-window splitting for a language with no tree-sitter grammar", async () => {

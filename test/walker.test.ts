@@ -25,6 +25,7 @@ describe("walkRepo", () => {
       "src/calculator.ts",
       "src/classEdgeCases.ts",
       "src/hugeMethodInClass.ts",
+      "src/hugeSingleLine.ts",
       "src/index.ts",
       "src/large.rs",
       "src/manyFunctions.ts",

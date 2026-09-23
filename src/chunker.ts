@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { extname, join } from "node:path";
+import { encode, decode } from "gpt-tokenizer";
 import { buildAstChunks } from "./astChunker.js";
 
 export interface Chunk {
@@ -21,12 +22,21 @@ export interface ChunkOptions {
   windowLines?: number;
   /** Overlap between consecutive windows, in lines. */
   overlapLines?: number;
+  /**
+   * Hard cap, in tokens, on any single chunk's text -- a last-resort safety
+   * net for pathological content that every other splitting strategy here
+   * measures in *lines*, not tokens, and is therefore blind to (see
+   * `capOversizedChunks`). Defaults to 8000, just under OpenAI's 8192-token
+   * per-input embedding limit.
+   */
+  maxChunkTokens?: number;
 }
 
 const DEFAULTS: Required<ChunkOptions> = {
   wholeFileLineThreshold: 120,
   windowLines: 120,
   overlapLines: 20,
+  maxChunkTokens: 8000,
 };
 
 /**
@@ -65,8 +75,9 @@ export async function chunkFile(root: string, relPath: string, options: ChunkOpt
   const text = readFileSync(absPath, "utf8");
   const lines = splitLines(text);
 
+  let chunks: Chunk[];
   if (lines.length <= opts.wholeFileLineThreshold) {
-    return [
+    chunks = [
       {
         filePath: relPath,
         startLine: 1,
@@ -75,19 +86,74 @@ export async function chunkFile(root: string, relPath: string, options: ChunkOpt
         isWholeFile: true,
       },
     ];
+  } else {
+    let astChunks: Chunk[] | null = null;
+    try {
+      astChunks = await buildAstChunks(text, extname(relPath).toLowerCase(), relPath, opts);
+    } catch {
+      // Grammar failed to load or the file didn't actually parse as its
+      // extension's language -- fall through to plain line-window splitting
+      // rather than failing the whole run over one file's chunking.
+    }
+    chunks = astChunks ?? splitLineRangeIntoWindows(relPath, lines, 1, lines.length, opts);
   }
 
-  let chunks: Chunk[] | null = null;
-  try {
-    chunks = await buildAstChunks(text, extname(relPath).toLowerCase(), relPath, opts);
-  } catch {
-    // Grammar failed to load or the file didn't actually parse as its
-    // extension's language -- fall through to plain line-window splitting
-    // rather than failing the whole run over one file's chunking.
-  }
-  chunks ??= splitLineRangeIntoWindows(relPath, lines, 1, lines.length, opts);
+  return dropEmptyChunks(capOversizedChunks(chunks, opts.maxChunkTokens));
+}
 
-  return dropEmptyChunks(chunks);
+/**
+ * Last-resort safety net for a chunk whose raw text would blow past an
+ * embedding provider's per-input token limit, even though nothing upstream
+ * saw it coming -- every splitting strategy above (whole-file, AST-boundary,
+ * class-member, line-window) measures size in *lines*, so a file with one
+ * (or a handful of) pathologically long lines -- a minified bundle, a huge
+ * generated single-line JSON blob -- sails straight through every one of
+ * them as "small" and comes out the other end as a single giant chunk.
+ * Found via a real repro built for exactly this: a 140KB two-line fixture
+ * (well under any wholeFileLineThreshold/windowLines default) produced ONE
+ * chunk carrying over 100,000 tokens -- more than 12x OpenAI's 8,192-token
+ * embedding limit -- which is precisely the failure mode that hard-failed a
+ * real run in an earlier round (see TESTING.md), just via a different root
+ * cause (a pathological line rather than a misclassified binary file).
+ *
+ * A cheap length check (`text.length <= maxTokens`) skips tokenizing the
+ * overwhelming majority of chunks -- ordinary source text essentially never
+ * packs more than one token per character, so anything shorter than
+ * maxTokens characters cannot possibly exceed maxTokens tokens. Only a
+ * chunk that clears that bar gets actually tokenized, and only one that
+ * truly exceeds the limit gets sliced -- via decode(encode(text).slice(...))
+ * -- into token-exact pieces, so every emitted chunk is provably within
+ * budget rather than merely probably.
+ *
+ * Two known, accepted tradeoffs of splitting below line granularity: every
+ * sub-chunk inherits its parent's original startLine/endLine as-is (real
+ * character-offset tracking within a token slice isn't worth the complexity
+ * for what's already a pathological-input safety net, not the common path),
+ * and a slice landing entirely on trailing whitespace is silently removed by
+ * the dropEmptyChunks pass this feeds into -- consistent with how any other
+ * whitespace-only chunk is already treated (see that function's doc comment).
+ */
+function capOversizedChunks(chunks: Chunk[], maxTokens: number): Chunk[] {
+  const result: Chunk[] = [];
+  for (const chunk of chunks) {
+    if (chunk.text.length <= maxTokens) {
+      result.push(chunk);
+      continue;
+    }
+    const tokens = encode(chunk.text);
+    if (tokens.length <= maxTokens) {
+      result.push(chunk);
+      continue;
+    }
+    for (let i = 0; i < tokens.length; i += maxTokens) {
+      result.push({
+        ...chunk,
+        text: decode(tokens.slice(i, i + maxTokens)),
+        isWholeFile: false,
+      });
+    }
+  }
+  return result;
 }
 
 /**
