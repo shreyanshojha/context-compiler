@@ -1,6 +1,14 @@
 export interface EmbeddingProvider {
   /** Embed a batch of texts, returning one vector per input in the same order. */
   embed(texts: string[]): Promise<number[][]>;
+  /**
+   * Identifies which provider+model produced this instance's vectors (e.g.
+   * "openai:text-embedding-3-small", "voyage:voyage-code-3", "fake").
+   * CachingEmbeddingProvider folds this into its cache keys so a vector
+   * embedded by one provider/model can never be handed back as if it came
+   * from another -- see cache.ts for the real bug this closes.
+   */
+  readonly namespace: string;
 }
 
 // Large enough that hash collisions between unrelated words are rare —
@@ -16,6 +24,8 @@ const FAKE_DIMENSIONS = 1024;
  * tests need to exercise ranking logic meaningfully.
  */
 export class FakeEmbeddingProvider implements EmbeddingProvider {
+  readonly namespace = "fake";
+
   async embed(texts: string[]): Promise<number[][]> {
     return texts.map((text) => embedOne(text));
   }
@@ -67,6 +77,7 @@ function normalize(vector: number[]): number[] {
  */
 export class OpenAIEmbeddingProvider implements EmbeddingProvider {
   private model: string;
+  readonly namespace: string;
 
   constructor(model = "text-embedding-3-small") {
     if (!process.env.OPENAI_API_KEY) {
@@ -76,6 +87,7 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
       );
     }
     this.model = model;
+    this.namespace = `openai:${model}`;
   }
 
   async embed(texts: string[]): Promise<number[][]> {
@@ -103,6 +115,7 @@ export class OpenAIEmbeddingProvider implements EmbeddingProvider {
  */
 export class VoyageEmbeddingProvider implements EmbeddingProvider {
   private model: string;
+  readonly namespace: string;
 
   constructor(model = "voyage-code-3") {
     if (!process.env.VOYAGE_API_KEY) {
@@ -112,6 +125,7 @@ export class VoyageEmbeddingProvider implements EmbeddingProvider {
       );
     }
     this.model = model;
+    this.namespace = `voyage:${model}`;
   }
 
   async embed(texts: string[]): Promise<number[][]> {

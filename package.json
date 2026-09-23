@@ -1,6 +1,6 @@
 {
   "name": "@shreyanshojha/context-compiler",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Automatically compile the right slice of a repo into context for AI coding agents.",
   "license": "MIT",
   "author": "Shreyansh Ojha",
