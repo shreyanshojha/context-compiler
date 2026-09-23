@@ -52,6 +52,19 @@ describe("walkRepo", () => {
     expect(files.some((f) => f.endsWith(".png"))).toBe(false);
   });
 
+  it("REGRESSION: excludes binary content even on an extension not in the binary list", () => {
+    // Found via a real-world test with real OpenAI embeddings: this
+    // project's own bundled .wasm grammar files weren't on the extension
+    // list, got walked as text, and the resulting UTF-8-decode garbage was
+    // dense enough to blow past OpenAI's per-input token limit and hard-fail
+    // the run. An extension list can never enumerate every binary format --
+    // src/mystery.customfmt simulates exactly that: a NUL-prefixed binary
+    // file on an extension nothing in BINARY_EXTENSIONS recognizes. Content
+    // sniffing (a NUL byte in the first 8KB) is the actual fix.
+    const files = walkRepo({ root: FIXTURE_ROOT });
+    expect(files).not.toContain("src/mystery.customfmt");
+  });
+
   it("always excludes its own embedding cache file, even if not gitignored", () => {
     // Regression test: without this, running the tool writes a cache file
     // into the repo, which the *next* run's walker then picks up as a new

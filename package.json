@@ -1,8 +1,32 @@
 {
   "name": "context-compiler",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Automatically compile the right slice of a repo into context for AI coding agents.",
   "license": "MIT",
+  "author": "Shreyansh Ojha",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shreyanshojha/context-compiler.git"
+  },
+  "homepage": "https://github.com/shreyanshojha/context-compiler#readme",
+  "bugs": {
+    "url": "https://github.com/shreyanshojha/context-compiler/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai",
+    "llm",
+    "coding-agent",
+    "context",
+    "embeddings",
+    "rag",
+    "tree-sitter",
+    "developer-tools"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "type": "module",
   "bin": {
     "context-compiler": "./dist/cli.js",

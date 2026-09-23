@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, statSync, readdirSync } from "node:fs";
+import { readFileSync, existsSync, statSync, readdirSync, openSync, readSync, closeSync } from "node:fs";
 import { join, relative } from "node:path";
 import { createRequire } from "node:module";
 import type { Ignore } from "ignore";
@@ -23,18 +23,68 @@ const ALWAYS_SKIP_DIRS = new Set([".git", "node_modules", ".DS_Store"]);
  */
 const ALWAYS_SKIP_FILES = new Set([".context-compiler-cache.json"]);
 
-/** Extensions treated as binary/non-text; never chunked or embedded. */
+/**
+ * Extensions treated as binary/non-text; never chunked or embedded. This is
+ * a fast path (skips even opening the file) for the common cases, not the
+ * only line of defense -- see isBinaryContent below for why an extension
+ * list alone isn't enough.
+ */
 const BINARY_EXTENSIONS = new Set([
-  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg",
-  ".woff", ".woff2", ".ttf", ".eot",
-  ".zip", ".tar", ".gz", ".7z",
+  ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg", ".bmp", ".tiff", ".avif", ".heic",
+  ".woff", ".woff2", ".ttf", ".eot", ".otf",
+  ".zip", ".tar", ".gz", ".7z", ".dmg", ".iso",
   ".pdf", ".mp4", ".mp3", ".mov", ".wav",
-  ".exe", ".dll", ".so", ".dylib",
+  ".exe", ".dll", ".so", ".dylib", ".wasm", ".class", ".jar", ".o", ".a", ".pyc", ".pyo", ".node",
+  ".db", ".sqlite", ".sqlite3", ".bin", ".dat",
   ".lock",
 ]);
 
 /** Files above this size are skipped even if textual (likely generated/data). */
 export const MAX_FILE_BYTES = 512 * 1024; // 512 KB
+
+/** How many leading bytes to inspect when sniffing for binary content. */
+const BINARY_SNIFF_BYTES = 8000;
+
+/**
+ * Content-based binary detection, used as a fallback behind the extension
+ * list above: read up to the first 8,000 bytes and look for a NUL byte, the
+ * same heuristic tools like git and `grep -I` use. Genuine text essentially
+ * never contains one; almost every real binary format does very early (a
+ * WASM module, for instance, opens with the magic bytes `\0asm` -- the very
+ * first byte is a NUL).
+ *
+ * Found necessary via a real-world test with real OpenAI embeddings: this
+ * project's own bundled `wasm/*.wasm` tree-sitter grammar files -- not on
+ * the extension list at the time -- were being walked as candidate text,
+ * read as UTF-8 (producing dense decode garbage, not an error, since
+ * `readFileSync(..., "utf8")` never throws on invalid bytes), and chunked
+ * like any other file. The garbage was dense enough under BPE tokenization
+ * that several resulting chunks exceeded OpenAI's 8,192-token embedding
+ * input limit, hard-failing the entire run with an opaque 400 error rather
+ * than a clear "skipped binary file" -- and a line-count-based chunking
+ * threshold has no way to catch this on its own, since one "line" of binary
+ * data can tokenize far denser than 120 lines of real code. An extension
+ * list can never be complete (this exact bug is proof), so content
+ * sniffing is the actual fix; the extension list stays as a cheap fast path
+ * that avoids opening a file at all for the common, unambiguous cases.
+ */
+function isBinaryContent(absPath: string): boolean {
+  let fd: number;
+  try {
+    fd = openSync(absPath, "r");
+  } catch {
+    return false; // unreadable here -- let the later real read surface the error
+  }
+  try {
+    const buffer = Buffer.alloc(BINARY_SNIFF_BYTES);
+    const bytesRead = readSync(fd, buffer, 0, BINARY_SNIFF_BYTES, 0);
+    return buffer.subarray(0, bytesRead).includes(0);
+  } catch {
+    return false;
+  } finally {
+    closeSync(fd);
+  }
+}
 
 export interface WalkOptions {
   /** Absolute path to the repo root. */
@@ -96,17 +146,18 @@ function walkDir(root: string, dir: string, ig: Ignore, results: string[]): void
       if (ig.ignores(rel + "/")) continue;
       walkDir(root, abs, ig, results);
     } else if (stat.isFile()) {
-      if (isCandidateFile(rel, stat.size)) {
+      if (isCandidateFile(rel, abs, stat.size)) {
         results.push(rel);
       }
     }
   }
 }
 
-function isCandidateFile(relPath: string, sizeBytes: number): boolean {
+function isCandidateFile(relPath: string, absPath: string, sizeBytes: number): boolean {
   if (sizeBytes === 0 || sizeBytes > MAX_FILE_BYTES) return false;
   const ext = extname(relPath);
   if (BINARY_EXTENSIONS.has(ext)) return false;
+  if (isBinaryContent(absPath)) return false;
   return true;
 }
 

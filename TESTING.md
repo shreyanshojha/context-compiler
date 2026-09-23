@@ -4,7 +4,7 @@ This is the full technical record from building and stress-testing context-compi
 
 ## Automated test suite
 
-112 tests across 15 files, all offline (no API keys or network required) except where noted:
+113 tests across 15 files, all offline (no API keys or network required) except where noted (Round 7 below additionally validates the pipeline against real OpenAI and Anthropic API keys, outside the automated suite):
 
 - `walker.test.ts`, `chunker.test.ts`, `astChunker.test.ts`, `budget.test.ts`, `output.test.ts`, `cache.test.ts`, `config.test.ts` — core pipeline stages. `astChunker.test.ts` covers per-method/per-field chunking of oversized classes specifically: decorators staying attached to the member they decorate, private fields, static init blocks, computed method names, generators, getters/setters, abstract classes, anonymous class expressions, TS overload groups, and Python nested classes.
 - `embeddings.test.ts` — fake provider determinism/similarity behavior; `OpenAIEmbeddingProvider`/`VoyageEmbeddingProvider` clear-error-without-key checks; a mocked-network test that verifies the *actual* HTTP request `VoyageEmbeddingProvider` sends (endpoint, auth header, model, response re-ordering) without needing a real key.
@@ -75,6 +75,19 @@ Verified end-to-end after all five fixes: `npm pack` → extract into an empty d
 
 Reproduce the stress test yourself: `npm run stress -- <path to any large cloned repo>`.
 
+### Round 7 — real provider validation with live API keys (one more real bug found and fixed)
+
+Every prior round ran offline (`--provider fake`) or against mocked network transports — enough to prove request *shapes* and *chunk* correctness, but never an actual round-trip against a real embedding/chat model. With real `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` keys, the full pipeline was run end-to-end against this project's own repo (self-referential: asking it to find its own per-method-chunking code):
+
+- Real OpenAI embeddings (`text-embedding-3-small`), no rerank.
+- Real OpenAI embeddings + real OpenAI rerank (`gpt-4o-mini`).
+- Real OpenAI embeddings + real **Anthropic** rerank (`claude-haiku-4-5`) — the exact provider combination that produced the original `404 model: gpt-4o-mini` error at the very start of this project's testing (see the multi-provider bug below). With a real key this time, it completed cleanly and returned real, specific reasoning for excluded candidates (e.g. *"Tests output formatting of chunks, not the chunking algorithm itself"*) — not a mocked string.
+- The MCP tool handler itself (`handleCompileContextTool`, not just the CLI) called directly with real keys and `rerankProvider: "anthropic"`, confirming the MCP-specific code path — a client would invoke this function, not the CLI — works identically.
+
+**Real bug found and fixed:** the very first real OpenAI run failed outright: `400 Invalid 'input[123]': maximum input length is 8192 tokens`. Root cause: this project's own bundled `wasm/*.wasm` tree-sitter grammar files were being walked as candidate *text* files — `BINARY_EXTENSIONS` was an extension allowlist-to-exclude, and `.wasm` simply wasn't on it. Read as UTF-8 (which never throws on invalid bytes, it just produces replacement-character garbage), the file chunked "successfully," and that garbage tokenized at up to ~1 token per byte under BPE — dense enough that several chunks blew past OpenAI's 8,192-token embedding limit and hard-failed the *entire* run on one bad file. An extension list can never be complete (this is direct proof), so the walker now backs it with real content sniffing: any file that survives the extension/size checks gets its first 8KB read and checked for a NUL byte — the same heuristic `git` and `grep -I` use, and a reliable one (a WASM module's magic header is literally `\0asm`, a leading NUL). Verified: `wasm/tree-sitter-python.wasm` is now excluded, all three real-provider runs above complete successfully, and the full offline suite (113 tests) and both large-repo stress tests (Angular, Django) still pass with identical results otherwise. Regression test added with a synthetic NUL-prefixed file on an extension (`.customfmt`) deliberately *not* on the extension list, so the content-sniffing fallback specifically (not the extension fast path) is what's under test.
+
+This is also the reason the whole-file/line-window size thresholds (`wholeFileLineThreshold`, `windowLines`) are line-count-based, not token-based, worth calling out as a known sharp edge: a legitimate text file with one pathologically long line (a minified bundle, a huge generated single-line JSON) could in principle still produce an over-limit chunk even with binaries correctly excluded. Not observed in any of the seven real repos stress-tested across this project, and out of scope for this round, but noted under Known Limitations below for anyone chunking generated/minified sources.
+
 ## The AST-based import graph (tree-sitter)
 
 The structural-boost import graph originally used a regex scan for import/require statements. That's a real limitation: a regex has no idea whether `require(...)`-shaped text is inside a comment, a string, or a function that merely happens to be named `require` — it will connect files based on any of those.
@@ -125,6 +138,7 @@ The compiled-bundle cost stays flat near the configured budget regardless of rep
 
 - The import graph still misses bundler path aliases (e.g. `@/utils`) and barrel re-export chains, and only covers JS/TS/TSX/Python — it's a ranking nudge, not a full dependency-analysis tool.
 - Rerank is opt-in and costs real API calls beyond embeddings — deliberately not defaulted on.
+- Chunk-size thresholds (`wholeFileLineThreshold`, `windowLines`) are line-count-based, not token-based. Binary content is now excluded at the source (Round 7), but a legitimate text file with one pathologically long line (a minified bundle, a huge generated single-line JSON) could in principle still produce a chunk over an embedding provider's token limit. Not observed across any of the seven real repos stress-tested in this project; a token-aware safety cap would be the next hardening step if it ever is.
 - Runtime/quality comparisons (time saved from an agent skipping its own exploration, task pass/fail rate with vs. without the tool) are directional reasoning based on the above, not independently measured — that would need a controlled study across real coding tasks, which is future work.
 
 ## What's not yet built

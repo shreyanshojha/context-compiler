@@ -2,3 +2,5 @@ node_modules/
 dist/
 *.log
 .env
+.context-compiler-cache.json
+context-compiler-*.tgz

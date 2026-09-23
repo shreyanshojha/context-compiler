@@ -59,6 +59,10 @@ Paste the snippet `init` printed into your agent's MCP config, e.g.:
 
 `OPENAI_API_KEY` is required for embeddings unless you use `--provider voyage` (and for `--rerank` if `rerankProvider` is `openai`, the default). `ANTHROPIC_API_KEY` is only needed if you set `rerankProvider` to `anthropic` — that only affects the rerank/triage step. `VOYAGE_API_KEY` is only needed if you set `provider` to `voyage`.
 
+If you're working inside this repo with Claude Code, `.mcp.json` at the repo root already wires the server up (relative path, no editing needed) and reads the same three variables from your own shell environment — just make sure `OPENAI_API_KEY` (and `ANTHROPIC_API_KEY`/`VOYAGE_API_KEY` if you use them) are exported before starting Claude Code, and it connects automatically.
+
+Any MCP-compatible client works the same way — Claude Desktop, Cursor, Windsurf, etc. all read a `command`/`args`/`env` block like the one above; only the config file's location differs per app.
+
 This exposes one tool, `compile_context` — the agent calls it itself, no manual CLI step. Inputs: `path`, `query`, `budgetTokens` (default 8000), `provider` (`openai` or `voyage`, default `openai`), `pin`, `ignore`, `useCache` (default true), `rerank` (default false), `rerankProvider` (`openai` or `anthropic`, default `openai`), `rerankModel` (defaults to `gpt-4o-mini` or `claude-haiku-4-5` depending on `rerankProvider`).
 
 ## Options
