@@ -6,6 +6,7 @@ import { compileContext } from "./index.js";
 import { OpenAIEmbeddingProvider, VoyageEmbeddingProvider, type EmbeddingProvider } from "./embeddings.js";
 import { CachingEmbeddingProvider } from "./cache.js";
 import { OpenAIRerankProvider, AnthropicRerankProvider, resolveRerankModel, type RerankProvider } from "./rerank.js";
+import { VERSION } from "./version.js";
 
 export const compileContextInputShape = {
   path: z.string().describe("Absolute or relative path to the repo root to scan."),
@@ -104,7 +105,7 @@ export async function handleCompileContextTool(
 }
 
 export function createServer(): McpServer {
-  const server = new McpServer({ name: "context-compiler", version: "0.5.0" });
+  const server = new McpServer({ name: "context-compiler", version: VERSION });
 
   server.registerTool(
     "compile_context",

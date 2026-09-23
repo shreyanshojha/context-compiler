@@ -16,7 +16,7 @@ Everything else below is what you can configure once you outgrow the defaults.
 ## What it does
 
 1. Walks your repo, respecting `.gitignore` (skips `node_modules`, build output, binaries, oversized files, and its own cache file).
-2. Splits files into chunks — small files stay whole; large JS/TS/TSX/Python files split at function/class boundaries (via tree-sitter) so a function isn't cut in half, with plain overlapping line windows as the fallback for other languages.
+2. Splits files into chunks — small files stay whole; large JS/TS/TSX/Python files split at function/class boundaries (via tree-sitter) so a function isn't cut in half; an oversized class gets the same treatment one level down, split by its own methods so a giant class doesn't get blindly cut either. Plain overlapping line windows are the fallback for other languages, and for any single function or method still bigger than the window on its own.
 3. Ranks every chunk against your task using embeddings, boosted by a real import-graph signal (tree-sitter, not regex — see "How ranking works") — a file with low text similarity but a direct import relationship to a top hit still gets pulled in.
 4. **Optional cheap-model triage** (`--rerank`): a second pass, using a cheap chat model — `gpt-4o-mini` or Claude Haiku (`--rerank-provider openai|anthropic`) — not the model you'll actually code with — reviews the top candidates and drops ones that only looked relevant on paper. The point: a small, inexpensive model does the *finding*, so your real coding session (Claude Code, Cursor, whatever you're paying more per token for) only spends its tokens and context window on the *doing*.
 5. Greedily selects the highest-relevance chunks that fit inside a token budget. Files you `--pin` are always included first, in full.
@@ -110,7 +110,7 @@ npm run dev -- "..." --provider fake   # run from source without building
 
 ## Status
 
-v4 — zero-config CLI (positional query + `.context-compiler.json` + `init`), MCP-ready, real (tree-sitter) structural ranking, pinning, explainability, caching, an optional multi-provider cheap-model triage pass (OpenAI or Anthropic), and a code-optimized embedding option (Voyage AI).
+v6 — zero-config CLI (positional query + `.context-compiler.json` + `init`), MCP-ready, real (tree-sitter) structural ranking and chunking down to the method/field level, pinning, explainability, caching, an optional multi-provider cheap-model triage pass (OpenAI or Anthropic), and a code-optimized embedding option (Voyage AI).
 
 See [`TESTING.md`](./TESTING.md) for the full test suite breakdown, real-world repo stress-test results, and measured token/cost savings.
 

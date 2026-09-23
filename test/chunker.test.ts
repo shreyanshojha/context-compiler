@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { chunkFile } from "../src/chunker.js";
+import { chunkFile, splitLines } from "../src/chunker.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_ROOT = join(__dirname, "fixtures", "sample-repo");
@@ -105,6 +105,65 @@ describe("chunkFile", () => {
     }
   });
 
+  it("REGRESSION: a file's own trailing newline never produces a phantom extra chunk", async () => {
+    // Found via a real-world stress test against Angular's core/common/forms
+    // packages: 43 chunks across the run were nothing but a single empty
+    // line, one past the file's real content. Cause: `text.split("\n")` on a
+    // file ending in "\n" (nearly all of them) always adds one synthetic
+    // empty trailing element -- treated as a real extra line, it became its
+    // own filler segment whenever the chunk before it in the packing pass
+    // was already at windowLines capacity and couldn't absorb it.
+    // src/manyFunctions.ts already ends in "\n" (as `Write` always leaves
+    // files); windowLines=40 with several ~30-line functions reliably lands
+    // a chunk at or near capacity right before EOF.
+    const chunks = await chunkFile(FIXTURE_ROOT, "src/manyFunctions.ts", {
+      wholeFileLineThreshold: 20,
+      windowLines: 40,
+      overlapLines: 5,
+    });
+    for (const c of chunks) {
+      expect(c.text.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it("REGRESSION: never returns a chunk that's nothing but blank lines, across every fixture in the repo", async () => {
+    // Found via a real-world stress test against Django's db/forms/core
+    // packages: a handful of two-line chunks that were nothing but a blank
+    // line gap between two class members, orphaned because the chunk before
+    // them in the packing pass was already at windowLines capacity and
+    // couldn't absorb the gap. A whitespace-only chunk is worse than no
+    // chunk -- it still costs an embedding call for zero information.
+    // Exercised here as a blanket property across every real fixture file
+    // (several different window sizes, to vary where a packed segment lands
+    // relative to capacity) rather than one hand-crafted repro, since the
+    // original bug only showed up on real code at a scale these fixtures
+    // don't individually reach.
+    const files = [
+      "src/auth.ts",
+      "src/bigClass.ts",
+      "src/classEdgeCases.ts",
+      "src/hugeMethodInClass.ts",
+      "src/manyFunctions.ts",
+      "src/manySmallExports.ts",
+      "src/overloadedMethods.ts",
+      "pyutils/big_class.py",
+      "pyutils/helpers.py",
+      "pyutils/main.py",
+    ];
+    for (const windowLines of [15, 20, 40, 80]) {
+      for (const file of files) {
+        const chunks = await chunkFile(FIXTURE_ROOT, file, {
+          wholeFileLineThreshold: 10,
+          windowLines,
+          overlapLines: Math.max(1, Math.floor(windowLines / 8)),
+        });
+        for (const c of chunks) {
+          expect(c.text.trim().length, `${file} @ windowLines=${windowLines}: empty chunk at ${c.startLine}-${c.endLine}`).toBeGreaterThan(0);
+        }
+      }
+    }
+  });
+
   it("falls back to line-window splitting for a language with no tree-sitter grammar", async () => {
     // .rs (Rust) has no bundled grammar -- buildAstChunks returns null for
     // it, and chunkFile must fall back cleanly rather than throwing.
@@ -115,5 +174,27 @@ describe("chunkFile", () => {
     });
     expect(chunks.length).toBeGreaterThan(1);
     expect(chunks.every((c) => !c.isWholeFile)).toBe(true);
+  });
+});
+
+describe("splitLines", () => {
+  it("drops the single synthetic trailing element a file-ending newline adds", () => {
+    expect(splitLines("a\nb\n")).toEqual(["a", "b"]);
+  });
+
+  it("leaves line count unchanged when the file has no trailing newline", () => {
+    expect(splitLines("a\nb")).toEqual(["a", "b"]);
+  });
+
+  it("preserves real blank lines the author left before EOF -- only the one synthetic entry is dropped", () => {
+    expect(splitLines("a\nb\n\n")).toEqual(["a", "b", ""]);
+  });
+
+  it("handles an empty file", () => {
+    expect(splitLines("")).toEqual([""]);
+  });
+
+  it("handles a file that is just one newline", () => {
+    expect(splitLines("\n")).toEqual([""]);
   });
 });

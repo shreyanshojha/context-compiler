@@ -18,8 +18,7 @@ import {
   resolveRerankModel,
   type RerankProvider,
 } from "./rerank.js";
-
-const VERSION = "0.5.0";
+import { VERSION } from "./version.js";
 
 /**
  * Find a --path/-p value in raw argv before commander parses anything.

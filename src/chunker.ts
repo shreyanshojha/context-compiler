@@ -30,6 +30,27 @@ const DEFAULTS: Required<ChunkOptions> = {
 };
 
 /**
+ * Splits text into lines the way a human counting lines would, not the way
+ * `String.split("\n")` alone does: a file ending in a trailing newline (the
+ * overwhelming majority of real source files) otherwise produces one extra
+ * synthetic "line" -- an empty string past the real end of the file -- which
+ * both inflates every reported endLine by one and, worse, can surface as its
+ * own separate near-empty chunk when the segment before it in the packing
+ * pass is already at windowLines capacity and can't absorb it. Found via a
+ * real-world stress test against Angular's core/common/forms packages: 43
+ * chunks across the run were nothing but that single phantom blank line.
+ * Stripping exactly one trailing empty element when the text actually ends
+ * in "\n" removes only that artifact -- genuine blank lines the author left
+ * before EOF are never touched, since split() only ever adds the one
+ * synthetic entry regardless of how many real blank lines precede it.
+ */
+export function splitLines(text: string): string[] {
+  const lines = text.split("\n");
+  if (text.endsWith("\n")) lines.pop();
+  return lines;
+}
+
+/**
  * Read a file and split it into one or more chunks.
  * Small files become a single whole-file chunk. Larger files in a language
  * with a tree-sitter grammar (JS/TS/TSX/Python) are split at function/class
@@ -42,7 +63,7 @@ export async function chunkFile(root: string, relPath: string, options: ChunkOpt
   const opts = { ...DEFAULTS, ...options };
   const absPath = join(root, relPath);
   const text = readFileSync(absPath, "utf8");
-  const lines = text.split("\n");
+  const lines = splitLines(text);
 
   if (lines.length <= opts.wholeFileLineThreshold) {
     return [
@@ -56,16 +77,37 @@ export async function chunkFile(root: string, relPath: string, options: ChunkOpt
     ];
   }
 
+  let chunks: Chunk[] | null = null;
   try {
-    const astChunks = await buildAstChunks(text, extname(relPath).toLowerCase(), relPath, opts);
-    if (astChunks) return astChunks;
+    chunks = await buildAstChunks(text, extname(relPath).toLowerCase(), relPath, opts);
   } catch {
     // Grammar failed to load or the file didn't actually parse as its
     // extension's language -- fall through to plain line-window splitting
     // rather than failing the whole run over one file's chunking.
   }
+  chunks ??= splitLineRangeIntoWindows(relPath, lines, 1, lines.length, opts);
 
-  return splitLineRangeIntoWindows(relPath, lines, 1, lines.length, opts);
+  return dropEmptyChunks(chunks);
+}
+
+/**
+ * A leftover filler segment that's nothing but blank lines (or, previously,
+ * comment-only stretches too small to pack with a neighbor -- see the
+ * windowLines-capacity note on packSegments in astChunker.ts) still shows up
+ * on real code from time to time: found via a stress test against Django's
+ * db/forms/core packages, five two-line chunks that were nothing but a
+ * blank-line gap between two class members whose neighboring chunk was
+ * already at windowLines capacity and couldn't absorb it. A chunk with no
+ * actual content is worse than not existing -- it still costs an embedding
+ * call and a slot in the budget for zero information -- so it's dropped
+ * here rather than patched at each place a filler segment can originate.
+ * The one-chunk-minimum guard keeps a genuinely all-blank file from ending
+ * up with zero chunks.
+ */
+function dropEmptyChunks(chunks: Chunk[]): Chunk[] {
+  if (chunks.length <= 1) return chunks;
+  const nonEmpty = chunks.filter((c) => c.text.trim().length > 0);
+  return nonEmpty.length > 0 ? nonEmpty : chunks;
 }
 
 /**

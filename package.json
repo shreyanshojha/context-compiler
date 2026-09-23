@@ -1,6 +1,6 @@
 {
   "name": "context-compiler",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Automatically compile the right slice of a repo into context for AI coding agents.",
   "license": "MIT",
   "type": "module",
@@ -9,11 +9,16 @@
     "context-compiler-mcp": "./dist/mcpServer.js"
   },
   "main": "./dist/index.js",
+  "files": [
+    "dist",
+    "wasm"
+  ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "prepare": "npm run build",
+    "prepare": "node -e \"require('fs').existsSync('tsconfig.json') && require('child_process').execSync('npm run build', {stdio:'inherit'})\"",
     "test": "vitest run",
-    "dev": "tsx src/cli.ts"
+    "dev": "tsx src/cli.ts",
+    "stress": "npm run build && node scripts/stress-test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.128.0",
