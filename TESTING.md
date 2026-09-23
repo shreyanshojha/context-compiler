@@ -4,7 +4,7 @@ This is the full technical record from building and stress-testing context-compi
 
 ## Automated test suite
 
-93 tests across 13 files, all offline (no API keys or network required) except where noted:
+98 tests across 14 files, all offline (no API keys or network required) except where noted:
 
 - `walker.test.ts`, `chunker.test.ts`, `budget.test.ts`, `output.test.ts`, `cache.test.ts`, `config.test.ts` — core pipeline stages.
 - `embeddings.test.ts` — fake provider determinism/similarity behavior; `OpenAIEmbeddingProvider`/`VoyageEmbeddingProvider` clear-error-without-key checks; a mocked-network test that verifies the *actual* HTTP request `VoyageEmbeddingProvider` sends (endpoint, auth header, model, response re-ordering) without needing a real key.
@@ -44,6 +44,11 @@ No crashes on any of the five, including React at roughly 14,200 chunks and a 75
 ### Round 4 — AST-based import parsing against real repos
 After replacing the regex-based import graph with real parsing (tree-sitter, see below), Flask and axios were re-run through the CLI end-to-end (offline `--rerank` mode) with no crashes across real Python and JS/TS syntax at repo scale.
 
+### Round 5 — AST-based chunking at scale (two real bugs found and fixed)
+After adding function/class-boundary-aware chunking (see below), re-running against axios surfaced a real over-fragmentation bug: one-line `export const X = ...` statements and similar trivial top-level declarations were each becoming their own chunk (247 chunks for a query that previously produced 16, most of them one line long). Root cause: every `export_statement` was treated as its own chunk boundary regardless of size. Fixed by restructuring the chunker into two passes — split into boundary-aligned segments, then greedily pack consecutive small segments back together up to the window size — which never merges *across* a large function but does stop treating every tiny statement as its own chunk. Chunk count for the same axios query dropped back to 18, in line with the pre-AST baseline. Covered by a regression test with 50 synthetic one-line exports, asserting they pack into a handful of chunks rather than 50.
+
+Re-running the full pipeline against React (7,146 files, the largest repo in the stress-test set) then surfaced a second, more serious real bug: a **12x runtime regression** (4.3s baseline → 50s). Profiling isolated it to the import-graph step (34s of the 50s): the tree-sitter query objects were being recompiled from their S-expression source on every single file, instead of once per grammar. Query compilation is real work, not free like a regex literal. Fixed by caching compiled queries by (grammar, query source); import-graph time on the same repo dropped from 34s to 9.3s (3.6x). A second pass (reusing one Parser instance per grammar instead of constructing one per file) made no measurable difference, confirming query compilation was the actual bottleneck rather than parser construction. End-to-end React runtime is now 22.6s — still slower than the pre-AST-parsing 4.3s baseline (real parsing has a real cost at this scale, a tradeoff documented in the README's known limitations), but a 2.2x improvement over the regression, and this was the largest and most demanding repo in the entire test set. Both fixes are covered by regression tests (a query-instance-identity test in `treeSitter.test.ts`, not a timing-based test, since timing assertions are flaky).
+
 ## The AST-based import graph (tree-sitter)
 
 The structural-boost import graph originally used a regex scan for import/require statements. That's a real limitation: a regex has no idea whether `require(...)`-shaped text is inside a comment, a string, or a function that merely happens to be named `require` — it will connect files based on any of those.
@@ -55,6 +60,12 @@ Demonstrated correctness improvement, covered by a regression test: a file that 
 Python's relative imports got a hybrid treatment: `from x.y import z` resolves via a declarative tree-sitter query, but `from . import helpers` and `from ..pkg.sub import x` need the leading-dot count and "no explicit module name" shape handled by walking the parse tree directly — a plain query can't express "count the dots and go up that many directories." Both cases are covered by tests.
 
 If `web-tree-sitter` fails to initialize in a given environment, the graph builder falls back to the original regex scan automatically (`buildImportGraphRegex`, still exported and tested) rather than failing the whole run.
+
+## Function/class-boundary-aware chunking
+
+Large files used to always be split into fixed-size, fixed-overlap line windows regardless of content — a function could easily land half in one chunk and half in another, weakening both halves' embeddings and giving a coding agent an incomplete function if only one chunk made the budget.
+
+For JS/TS/TSX/Python, chunking now uses the same tree-sitter infrastructure as the import graph to find top-level function/class boundaries and align chunks to them: a function or class is kept whole in one chunk unless it's genuinely bigger than the window size, in which case it's deliberately sub-split (still better than an arbitrary cut, since the common case — most functions — stays intact). Small top-level statements between boundaries (imports, one-line exports, constants) are packed together up to the window size rather than each becoming its own chunk. Falls back to the original fixed-size line windows for unsupported languages or files with no real boundaries (verified to produce byte-identical output to the pre-chunking-change behavior in that case). See Round 5 above for the two real bugs (fragmentation, then a performance regression) found and fixed while building this.
 
 ## Multi-provider support
 
@@ -90,5 +101,4 @@ The compiled-bundle cost stays flat near the configured budget regardless of rep
 
 ## What's not yet built
 
-- Function/AST-level chunking (currently: whole-file for small files, fixed line-window splits for large ones).
 - A hosted/team version, multi-repo context, or non-MCP agent integrations — see the roadmap in the README's "Status" section for the full backlog.

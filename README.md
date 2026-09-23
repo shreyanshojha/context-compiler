@@ -16,7 +16,7 @@ Everything else below is what you can configure once you outgrow the defaults.
 ## What it does
 
 1. Walks your repo, respecting `.gitignore` (skips `node_modules`, build output, binaries, oversized files, and its own cache file).
-2. Splits files into chunks (small files stay whole; large files split into overlapping line windows).
+2. Splits files into chunks — small files stay whole; large JS/TS/TSX/Python files split at function/class boundaries (via tree-sitter) so a function isn't cut in half, with plain overlapping line windows as the fallback for other languages.
 3. Ranks every chunk against your task using embeddings, boosted by a real import-graph signal (tree-sitter, not regex — see "How ranking works") — a file with low text similarity but a direct import relationship to a top hit still gets pulled in.
 4. **Optional cheap-model triage** (`--rerank`): a second pass, using a cheap chat model — `gpt-4o-mini` or Claude Haiku (`--rerank-provider openai|anthropic`) — not the model you'll actually code with — reviews the top candidates and drops ones that only looked relevant on paper. The point: a small, inexpensive model does the *finding*, so your real coding session (Claude Code, Cursor, whatever you're paying more per token for) only spends its tokens and context window on the *doing*.
 5. Greedily selects the highest-relevance chunks that fit inside a token budget. Files you `--pin` are always included first, in full.
@@ -87,7 +87,7 @@ CLI flags always override `.context-compiler.json`.
 3. **Cheap-model triage** (opt-in) — the current top candidates go to a cheap chat model with the task description; it can drop ones that don't actually hold up on inspection, with a one-line reason. This is the "cheaper model finds it" half of the pipeline — the coding model you use afterward never sees this step or its cost.
 4. **Explainability** — every entry in the output shows its score and why: semantic match, structural connection, cheap-model reasoning, or "pinned."
 
-Known limitations: the import graph still misses bundler path aliases (e.g. `@/utils`) and barrel re-export chains; it's a ranking nudge, not a full dependency-analysis tool. If `web-tree-sitter` fails to initialize in a given environment, the structural boost falls back to the older regex-based scan automatically rather than failing the run.
+Known limitations: the import graph still misses bundler path aliases (e.g. `@/utils`) and barrel re-export chains; it's a ranking nudge, not a full dependency-analysis tool. If `web-tree-sitter` fails to initialize in a given environment, the structural boost falls back to the older regex-based scan automatically rather than failing the run. Real parsing has a real cost at very large scale (thousands of files) compared to the old regex — see `TESTING.md` for measured numbers.
 
 ## Incremental caching
 

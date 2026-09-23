@@ -48,7 +48,7 @@ export async function compileContext(options: CompileOptions): Promise<CompileRe
   const files = walkRepo({ root: options.root, extraIgnores: options.extraIgnores });
   const pinnedSet = new Set(options.pinnedFiles ?? []);
 
-  const pinnedChunks = chunkPinnedFiles(options.root, options.pinnedFiles ?? []);
+  const pinnedChunks = await chunkPinnedFiles(options.root, options.pinnedFiles ?? []);
   const pinnedScored: ScoredChunk[] = pinnedChunks.map((chunk) => ({
     chunk,
     score: Number.POSITIVE_INFINITY,
@@ -57,7 +57,7 @@ export async function compileContext(options: CompileOptions): Promise<CompileRe
   const pinnedTokens = pinnedChunks.reduce((sum, c) => sum + countTokens(c.text), 0);
 
   const rankableFiles = files.filter((f) => !pinnedSet.has(f));
-  const chunks = chunkFiles(options.root, rankableFiles, options.chunkOptions);
+  const chunks = await chunkFiles(options.root, rankableFiles, options.chunkOptions);
 
   const rankOptions: RankOptions = {};
   if (options.useStructuralBoost ?? true) {
@@ -99,12 +99,13 @@ export async function compileContext(options: CompileOptions): Promise<CompileRe
   };
 }
 
-function chunkPinnedFiles(root: string, pinnedFiles: string[]): Chunk[] {
+async function chunkPinnedFiles(root: string, pinnedFiles: string[]): Promise<Chunk[]> {
   // Pinned files are included whole, regardless of size — the point of
   // pinning is "always give the agent this entire file," not a ranked slice.
-  return pinnedFiles.flatMap((relPath) =>
-    chunkFile(root, relPath, { wholeFileLineThreshold: Number.MAX_SAFE_INTEGER })
+  const perFile = await Promise.all(
+    pinnedFiles.map((relPath) => chunkFile(root, relPath, { wholeFileLineThreshold: Number.MAX_SAFE_INTEGER }))
   );
+  return perFile.flat();
 }
 
 export { walkRepo } from "./walker.js";

@@ -19,7 +19,7 @@ import {
   type RerankProvider,
 } from "./rerank.js";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 
 /**
  * Find a --path/-p value in raw argv before commander parses anything.

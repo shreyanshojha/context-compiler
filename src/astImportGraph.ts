@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, normalize, relative } from "node:path";
-import { fileURLToPath } from "node:url";
-import Parser from "web-tree-sitter";
+import type Parser from "web-tree-sitter";
 import { ImportGraph } from "./importGraph.js";
+import { GRAMMAR_BY_EXT, parseAs, getQuery } from "./treeSitter.js";
 
 /**
  * Real-parser import extraction (JS/TS/TSX/Python), replacing the old
@@ -15,18 +15,6 @@ import { ImportGraph } from "./importGraph.js";
  * inside strings, comments, or a function merely *named* `require`. The AST
  * only matches real import/require/export-from syntax.
  */
-
-const WASM_DIR = join(dirname(fileURLToPath(import.meta.url)), "..", "wasm");
-
-const GRAMMAR_BY_EXT: Record<string, string> = {
-  ".js": "tree-sitter-javascript.wasm",
-  ".jsx": "tree-sitter-javascript.wasm",
-  ".mjs": "tree-sitter-javascript.wasm",
-  ".cjs": "tree-sitter-javascript.wasm",
-  ".ts": "tree-sitter-typescript.wasm",
-  ".tsx": "tree-sitter-tsx.wasm",
-  ".py": "tree-sitter-python.wasm",
-};
 
 // Matches import ... from '...'; export ... from '...'; require('...'); import('...')
 // across JS, TS, and TSX -- all four share these node shapes since the TS/TSX
@@ -59,23 +47,6 @@ const PY_FROM_IMPORT_QUERY = `
 (import_from_statement module_name: (dotted_name) @spec)
 `;
 
-let initPromise: Promise<void> | undefined;
-const languageCache = new Map<string, Parser.Language>();
-
-async function ensureInit(): Promise<void> {
-  if (!initPromise) initPromise = Parser.init();
-  return initPromise;
-}
-
-async function loadLanguage(wasmFile: string): Promise<Parser.Language> {
-  let lang = languageCache.get(wasmFile);
-  if (lang) return lang;
-  await ensureInit();
-  lang = await Parser.Language.load(join(WASM_DIR, wasmFile));
-  languageCache.set(wasmFile, lang);
-  return lang;
-}
-
 /**
  * Build an import graph using real parsing for JS/TS/TSX/Python, falling
  * back silently to "no edges for this file" if its grammar can't be loaded
@@ -89,8 +60,7 @@ export async function buildAstImportGraph(root: string, relPaths: string[]): Pro
 
   for (const relPath of relPaths) {
     const ext = extname(relPath);
-    const wasmFile = GRAMMAR_BY_EXT[ext];
-    if (!wasmFile) continue;
+    if (!GRAMMAR_BY_EXT[ext]) continue;
 
     let text: string;
     try {
@@ -101,7 +71,7 @@ export async function buildAstImportGraph(root: string, relPaths: string[]): Pro
 
     let specifiers: string[];
     try {
-      specifiers = ext === ".py" ? await extractPythonImports(text, relPath) : await extractJsImports(text, wasmFile);
+      specifiers = ext === ".py" ? await extractPythonImports(text, relPath) : await extractJsImports(text, ext);
     } catch {
       // Grammar failed to load, or the file doesn't actually parse as this
       // language (e.g. a .js file with syntax the grammar can't handle) --
@@ -118,12 +88,11 @@ export async function buildAstImportGraph(root: string, relPaths: string[]): Pro
   return graph;
 }
 
-async function extractJsImports(text: string, wasmFile: string): Promise<string[]> {
-  const lang = await loadLanguage(wasmFile);
-  const parser = new Parser();
-  parser.setLanguage(lang);
-  const tree = parser.parse(text);
-  const query = lang.query(JS_IMPORT_QUERY);
+async function extractJsImports(text: string, ext: string): Promise<string[]> {
+  const parsed = await parseAs(text, ext);
+  if (!parsed) return [];
+  const { tree, lang } = parsed;
+  const query = getQuery(lang, GRAMMAR_BY_EXT[ext], JS_IMPORT_QUERY);
 
   const specifiers: string[] = [];
   for (const match of query.matches(tree.rootNode)) {
@@ -135,15 +104,14 @@ async function extractJsImports(text: string, wasmFile: string): Promise<string[
 }
 
 async function extractPythonImports(text: string, relPath: string): Promise<string[]> {
-  const lang = await loadLanguage(GRAMMAR_BY_EXT[".py"]);
-  const parser = new Parser();
-  parser.setLanguage(lang);
-  const tree = parser.parse(text);
+  const parsed = await parseAs(text, ".py");
+  if (!parsed) return [];
+  const { tree, lang } = parsed;
 
   const specifiers: string[] = [];
 
   for (const queryString of [PY_PLAIN_IMPORT_QUERY, PY_FROM_IMPORT_QUERY]) {
-    const query = lang.query(queryString);
+    const query = getQuery(lang, GRAMMAR_BY_EXT[".py"], queryString);
     for (const match of query.matches(tree.rootNode)) {
       for (const capture of match.captures) {
         if (capture.name === "spec") specifiers.push(capture.node.text.replace(/\./g, "/"));
