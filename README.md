@@ -4,7 +4,7 @@ Automatically compiles the right slice of a repo into context for an AI coding a
 
 ## The 30-second version
 
-**Option A — from npm** (once published as `@shreyanshojha/context-compiler`):
+**Option A — from npm:**
 
 ```bash
 npm install -g @shreyanshojha/context-compiler
@@ -75,6 +75,22 @@ Paste the snippet `init` printed into your agent's MCP config, e.g.:
 If you're working inside this repo with Claude Code, `.mcp.json` at the repo root already wires the server up (relative path, no editing needed) and reads the same three variables from your own shell environment — just make sure `OPENAI_API_KEY` (and `ANTHROPIC_API_KEY`/`VOYAGE_API_KEY` if you use them) are exported before starting Claude Code, and it connects automatically.
 
 Any MCP-compatible client works the same way — Claude Desktop, Cursor, Windsurf, etc. all read a `command`/`args`/`env` block like the one above; only the config file's location differs per app.
+
+### Claude Code (CLI setup)
+
+Instead of hand-editing a config file, register it with the `claude mcp add` command. Run this from anywhere (it's self-resolving — no paths to fill in by hand):
+
+```bash
+claude mcp add context-compiler -s user \
+  -e OPENAI_API_KEY=sk-... \
+  -- "$(command -v node)" "$(npm root -g)/@shreyanshojha/context-compiler/dist/mcpServer.js"
+
+claude mcp list   # should show context-compiler as ✓ Connected
+```
+
+`-s user` registers it globally for that machine (as opposed to `-s project`, which writes to a shared `.mcp.json` in the current repo). **This registration is per-machine** — it's stored in `~/.claude.json`, so if you use Claude Code from more than one computer, run this command on each one.
+
+**If it shows "✗ Failed to connect," this is almost always a PATH issue, not a broken install** — especially if you manage Node with `nvm`. Both this CLI method and the JSON `command: "node"` config above rely on `node` being resolvable at launch time. Claude Code spawns MCP servers with a minimal environment that often doesn't include `nvm`'s directories on `PATH`, even if you pass an absolute path to the binary itself (the binary's own `#!/usr/bin/env node` shebang line still needs `PATH` to find `node`). The fix is to always give the **full, resolved path to the `node` binary itself** as the `command` — the `$(command -v node)` in the snippet above does exactly that. If you're editing a JSON config by hand instead of using `claude mcp add`, replace `"command": "node"` with the absolute path (run `which node` in the terminal you'd normally use, and paste that instead of the bare word `node`).
 
 This exposes one tool, `compile_context` — the agent calls it itself, no manual CLI step. Inputs: `path`, `query`, `budgetTokens` (default 8000), `provider` (`openai` or `voyage`, default `openai`), `pin`, `ignore`, `useCache` (default true), `rerank` (default false), `rerankProvider` (`openai` or `anthropic`, default `openai`), `rerankModel` (defaults to `gpt-4o-mini` or `claude-haiku-4-5` depending on `rerankProvider`).
 
