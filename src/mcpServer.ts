@@ -8,6 +8,7 @@ import { OpenAIEmbeddingProvider, VoyageEmbeddingProvider, type EmbeddingProvide
 import { CachingEmbeddingProvider } from "./cache.js";
 import { OpenAIRerankProvider, AnthropicRerankProvider, resolveRerankModel, type RerankProvider } from "./rerank.js";
 import { VERSION } from "./version.js";
+import { recordRun } from "./metrics.js";
 
 export const compileContextInputShape = {
   path: z.string().describe("Absolute or relative path to the repo root to scan."),
@@ -23,6 +24,13 @@ export const compileContextInputShape = {
         "requires VOYAGE_API_KEY) instead of OpenAI's text-embedding-3-small (requires OPENAI_API_KEY)."
     ),
   useCache: z.boolean().default(true).describe("Reuse cached embeddings for unchanged content."),
+  logMetrics: z
+    .boolean()
+    .default(true)
+    .describe(
+      "Log this run's token usage locally (a plain, gitignored JSONL file in the repo, never sent anywhere), " +
+        "so `context-compiler stats` can report real usage over time."
+    ),
   rerank: z
     .boolean()
     .default(false)
@@ -96,6 +104,17 @@ export async function handleCompileContextTool(
       pinnedFiles: input.pin,
       rerankProvider,
     });
+
+    if (input.logMetrics) {
+      recordRun(root, {
+        task: input.query,
+        budgetTokens: input.budgetTokens,
+        tokensUsed: result.selection.totalTokens,
+        chunksIncluded: result.selection.selected.length,
+        chunksSkipped: result.selection.skipped.length,
+      });
+    }
+
     return { content: [{ type: "text", text: result.bundle }] };
   } catch (err) {
     return {

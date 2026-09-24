@@ -61,4 +61,27 @@ describe("buildImportGraph (AST-based, real parsing)", () => {
     const graph = await buildImportGraph(FIXTURE_ROOT, files);
     expect(graph.isConnected("pyutils/__init__.py", "pyutils/helpers.py")).toBe(true);
   });
+
+  it("resolves a tsconfig path alias (\"@/mathUtils\") the same as the equivalent relative import", async () => {
+    // aliasConsumer.ts imports `add` from '@/mathUtils' -- not a relative
+    // path at all. Previously this could never resolve: only "./foo"/"../bar"
+    // style specifiers were tried. The fixture's tsconfig.json maps "@/*" to
+    // "src/*", the same alias shape a real bundler-based repo uses.
+    const files = walkRepo({ root: FIXTURE_ROOT });
+    const graph = await buildImportGraph(FIXTURE_ROOT, files);
+    expect(graph.isConnected("src/aliasConsumer.ts", "src/mathUtils.ts")).toBe(true);
+  });
+
+  it("follows a barrel re-export chain transitively (REGRESSION: previously only reached the barrel itself)", async () => {
+    // barrelConsumer.ts imports `deepFeature` from './barrel', and barrel.ts
+    // is a pure re-export (`export * from './deepImpl'`) -- it has no code
+    // of its own. Before barrel-closure following, barrelConsumer only
+    // connected to barrel.ts, one hop short of deepImpl.ts, which is where
+    // the ranker's structural boost actually needed to point.
+    const files = walkRepo({ root: FIXTURE_ROOT });
+    const graph = await buildImportGraph(FIXTURE_ROOT, files);
+    expect(graph.isConnected("src/barrelConsumer.ts", "src/barrel.ts")).toBe(true);
+    expect(graph.isConnected("src/barrel.ts", "src/deepImpl.ts")).toBe(true);
+    expect(graph.isConnected("src/barrelConsumer.ts", "src/deepImpl.ts")).toBe(true);
+  });
 });

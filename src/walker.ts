@@ -19,9 +19,11 @@ const ALWAYS_SKIP_DIRS = new Set([".git", "node_modules", ".DS_Store"]);
  * Notably the tool's own embedding cache: without this, the cache file
  * written into the repo after one run becomes a "new file" the walker picks
  * up on the *next* run, silently changing the chunk count and making output
- * non-deterministic between runs on an otherwise-unchanged repo.
+ * non-deterministic between runs on an otherwise-unchanged repo. The local
+ * usage-metrics log (see metrics.ts) is the same category of self-generated
+ * file and needs the same treatment.
  */
-const ALWAYS_SKIP_FILES = new Set([".context-compiler-cache.json"]);
+const ALWAYS_SKIP_FILES = new Set([".context-compiler-cache.json", ".context-compiler-metrics.jsonl"]);
 
 /**
  * Extensions treated as binary/non-text; never chunked or embedded. This is

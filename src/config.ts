@@ -13,6 +13,8 @@ export interface ContextCompilerConfig {
   rerank?: boolean;
   rerankModel?: string;
   rerankProvider?: "openai" | "anthropic";
+  /** Log each run's token usage locally, for the project's own v1 success metric (see metrics.ts). Default true. */
+  logMetrics?: boolean;
 }
 
 /**
@@ -52,4 +54,5 @@ export const DEFAULT_CONFIG: Required<ContextCompilerConfig> = {
   rerank: false, // opt-in: costs real (if cheap) API calls beyond embeddings
   rerankProvider: "openai",
   rerankModel: "gpt-4o-mini", // provider-appropriate default is resolved at call time if this is left untouched
+  logMetrics: true,
 };

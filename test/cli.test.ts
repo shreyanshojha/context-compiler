@@ -113,4 +113,43 @@ describe("CLI (end-to-end via tsx, fake provider)", () => {
     expect(status).not.toBe(0);
     expect(stderr).toContain("ANTHROPIC_API_KEY is not set");
   }, 20000);
+
+  it("logs a run's token usage by default, readable via `stats`", () => {
+    runCli(["fix the login bug", "--provider", "fake", "--budget", "300"], repoDir);
+    const logPath = join(repoDir, ".context-compiler-metrics.jsonl");
+    expect(existsSync(logPath)).toBe(true);
+    expect(readFileSync(logPath, "utf8")).toContain('"type":"run"');
+
+    const { stderr } = runCli(["stats"], repoDir);
+    expect(stderr).toContain("Runs logged:        1");
+  }, 20000);
+
+  it("--no-log skips writing the usage-metrics file", () => {
+    runCli(["fix the login bug", "--provider", "fake", "--budget", "300", "--no-log"], repoDir);
+    expect(existsSync(join(repoDir, ".context-compiler-metrics.jsonl"))).toBe(false);
+  }, 20000);
+
+  it("`stats` reports no logged runs yet on a fresh repo", () => {
+    const { stderr } = runCli(["stats"], repoDir);
+    expect(stderr).toContain("No logged runs yet");
+  }, 20000);
+
+  it("`feedback` records a hit/miss outcome that `stats` then reports", () => {
+    runCli(["fix the login bug", "--provider", "fake", "--budget", "300"], repoDir);
+    runCli(["feedback", "miss", "needed the config file too"], repoDir);
+    const { stderr } = runCli(["stats"], repoDir);
+    expect(stderr).toContain("0 hit / 1 miss");
+  }, 20000);
+
+  it("`feedback` rejects an outcome that isn't hit or miss", () => {
+    const { stderr, status } = runCli(["feedback", "sort-of"], repoDir);
+    expect(status).not.toBe(0);
+    expect(stderr).toContain('Expected "hit" or "miss"');
+  }, 20000);
+
+  it("`doctor` runs without crashing and prints a ready-to-paste claude mcp add command", () => {
+    const { stderr } = runCli(["doctor"], repoDir);
+    expect(stderr).toContain("Node version");
+    expect(stderr).toContain("claude mcp add context-compiler");
+  }, 20000);
 });

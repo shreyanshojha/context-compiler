@@ -3,6 +3,7 @@ import { dirname, join, normalize, relative } from "node:path";
 import type Parser from "web-tree-sitter";
 import { ImportGraph } from "./importGraph.js";
 import { GRAMMAR_BY_EXT, parseAs, getQuery } from "./treeSitter.js";
+import { loadPathAliases, aliasCandidates, type PathAliasMap } from "./pathAliases.js";
 
 /**
  * Real-parser import extraction (JS/TS/TSX/Python), replacing the old
@@ -16,12 +17,14 @@ import { GRAMMAR_BY_EXT, parseAs, getQuery } from "./treeSitter.js";
  * only matches real import/require/export-from syntax.
  */
 
-// Matches import ... from '...'; export ... from '...'; require('...'); import('...')
-// across JS, TS, and TSX -- all four share these node shapes since the TS/TSX
-// grammars are supersets of the JS grammar for this syntax.
+// Matches import ... from '...'; require('...'); import('...') -- across JS,
+// TS, and TSX, since the TS/TSX grammars are supersets of the JS grammar for
+// this syntax. Deliberately does NOT include `export ... from '...'` -- that's
+// a re-export, tracked separately below so barrel files (a file that only
+// re-exports another file's contents) can be followed transitively rather
+// than treated as a dead end. See applyBarrelClosure.
 const JS_IMPORT_QUERY = `
 (import_statement source: (string (string_fragment) @spec))
-(export_statement source: (string (string_fragment) @spec))
 (call_expression
   function: (identifier) @fn
   arguments: (arguments (string (string_fragment) @spec))
@@ -29,6 +32,13 @@ const JS_IMPORT_QUERY = `
 (call_expression
   function: (import)
   arguments: (arguments (string (string_fragment) @spec)))
+`;
+
+// `export * from '...'` / `export { x } from '...'` -- a re-export, not a
+// use of the imported names by this file. Kept separate from JS_IMPORT_QUERY
+// specifically so a barrel file's re-exports can be followed transitively.
+const JS_REEXPORT_QUERY = `
+(export_statement source: (string (string_fragment) @spec))
 `;
 
 // Plain `import x`, `import x.y`, `import x as y` -- captures the dotted
@@ -57,6 +67,11 @@ const PY_FROM_IMPORT_QUERY = `
 export async function buildAstImportGraph(root: string, relPaths: string[]): Promise<ImportGraph> {
   const graph = new ImportGraph();
   const knownFiles = new Set(relPaths);
+  const aliasMap = loadPathAliases(root);
+  // Directed: file -> the file(s) it re-exports from ("export * from './x'").
+  // Used after the main pass to follow barrel files transitively -- see
+  // applyBarrelClosure's own comment for why a direct edge alone isn't enough.
+  const reexportAdjacency = new Map<string, string[]>();
 
   for (const relPath of relPaths) {
     const ext = extname(relPath);
@@ -69,9 +84,15 @@ export async function buildAstImportGraph(root: string, relPaths: string[]): Pro
       continue;
     }
 
-    let specifiers: string[];
+    let imports: string[];
+    let reexports: string[];
     try {
-      specifiers = ext === ".py" ? await extractPythonImports(text, relPath) : await extractJsImports(text, ext);
+      if (ext === ".py") {
+        imports = await extractPythonImports(text, relPath);
+        reexports = [];
+      } else {
+        ({ imports, reexports } = await extractJsImports(text, ext));
+      }
     } catch {
       // Grammar failed to load, or the file doesn't actually parse as this
       // language (e.g. a .js file with syntax the grammar can't handle) --
@@ -79,28 +100,95 @@ export async function buildAstImportGraph(root: string, relPaths: string[]): Pro
       continue;
     }
 
-    for (const spec of specifiers) {
-      const resolved = resolveImport(relPath, spec, knownFiles);
+    for (const spec of imports) {
+      const resolved = resolveImport(relPath, spec, knownFiles, aliasMap);
       if (resolved) graph.addEdge(relPath, resolved);
+    }
+    for (const spec of reexports) {
+      const resolved = resolveImport(relPath, spec, knownFiles, aliasMap);
+      if (resolved) {
+        graph.addEdge(relPath, resolved);
+        const list = reexportAdjacency.get(relPath);
+        if (list) list.push(resolved);
+        else reexportAdjacency.set(relPath, [resolved]);
+      }
     }
   }
 
+  applyBarrelClosure(graph, reexportAdjacency, relPaths);
   return graph;
 }
 
-async function extractJsImports(text: string, ext: string): Promise<string[]> {
-  const parsed = await parseAs(text, ext);
-  if (!parsed) return [];
-  const { tree, lang } = parsed;
-  const query = getQuery(lang, GRAMMAR_BY_EXT[ext], JS_IMPORT_QUERY);
+/**
+ * A barrel file (`export * from './deepImpl'`) creates a direct edge to
+ * deepImpl.ts, but a *consumer* of the barrel only gets a direct edge to the
+ * barrel itself -- one hop short of the file that actually has the code. The
+ * ranker's structural boost only checks direct edges (see ranker.ts's
+ * isConnected usage), so without this, importing through a barrel got none
+ * of the structural signal a direct import would have. This closes that gap:
+ * anything connected to a barrel also gets connected to whatever the barrel
+ * (transitively, through a chain of barrels) ultimately re-exports.
+ *
+ * A cycle guard makes this safe against `export * from` cycles, which are
+ * invalid JS but shouldn't be able to hang the graph build over malformed
+ * input either way.
+ */
+function applyBarrelClosure(
+  graph: ImportGraph,
+  reexportAdjacency: Map<string, string[]>,
+  relPaths: string[]
+): void {
+  if (reexportAdjacency.size === 0) return;
 
-  const specifiers: string[] = [];
-  for (const match of query.matches(tree.rootNode)) {
-    for (const capture of match.captures) {
-      if (capture.name === "spec") specifiers.push(capture.node.text);
+  const closureCache = new Map<string, Set<string>>();
+  function closureOf(file: string, visiting: Set<string>): Set<string> {
+    const cached = closureCache.get(file);
+    if (cached) return cached;
+    if (visiting.has(file)) return new Set();
+
+    visiting.add(file);
+    const result = new Set<string>();
+    for (const next of reexportAdjacency.get(file) ?? []) {
+      result.add(next);
+      for (const deeper of closureOf(next, visiting)) result.add(deeper);
+    }
+    visiting.delete(file);
+    closureCache.set(file, result);
+    return result;
+  }
+
+  for (const file of relPaths) {
+    for (const neighbor of [...graph.neighbors(file)]) {
+      const closure = closureOf(neighbor, new Set());
+      for (const target of closure) {
+        if (target !== file) graph.addEdge(file, target);
+      }
     }
   }
-  return specifiers;
+}
+
+async function extractJsImports(text: string, ext: string): Promise<{ imports: string[]; reexports: string[] }> {
+  const parsed = await parseAs(text, ext);
+  if (!parsed) return { imports: [], reexports: [] };
+  const { tree, lang } = parsed;
+
+  const imports: string[] = [];
+  const importQuery = getQuery(lang, GRAMMAR_BY_EXT[ext], JS_IMPORT_QUERY);
+  for (const match of importQuery.matches(tree.rootNode)) {
+    for (const capture of match.captures) {
+      if (capture.name === "spec") imports.push(capture.node.text);
+    }
+  }
+
+  const reexports: string[] = [];
+  const reexportQuery = getQuery(lang, GRAMMAR_BY_EXT[ext], JS_REEXPORT_QUERY);
+  for (const match of reexportQuery.matches(tree.rootNode)) {
+    for (const capture of match.captures) {
+      if (capture.name === "spec") reexports.push(capture.node.text);
+    }
+  }
+
+  return { imports, reexports };
 }
 
 async function extractPythonImports(text: string, relPath: string): Promise<string[]> {
@@ -210,13 +298,24 @@ function walk(node: Parser.SyntaxNode, visit: (node: Parser.SyntaxNode) => void)
  */
 const CANDIDATE_EXTS = ["", ".ts", ".tsx", ".js", ".jsx", ".py", "/index.ts", "/index.js"];
 
-function resolveImport(fromFile: string, specifier: string, knownFiles: Set<string>): string | null {
+function resolveImport(
+  fromFile: string,
+  specifier: string,
+  knownFiles: Set<string>,
+  aliasMap: PathAliasMap | null
+): string | null {
   const bases: string[] = [];
 
   if (specifier.startsWith(".") || specifier.startsWith("/")) {
     bases.push(normalize(join(dirname(fromFile), specifier)));
   } else {
+    // Not a relative path -- could be a bare package ("react", never
+    // resolvable), a tsconfig-aliased specifier ("@/utils"), or a
+    // Python-style absolute local import. Try both the plain repo-root
+    // interpretation and every alias pattern that matches; a genuine
+    // external package simply won't match anything in either case.
     bases.push(normalize(specifier));
+    bases.push(...aliasCandidates(specifier, aliasMap).map(normalize));
   }
 
   for (const base of bases) {

@@ -19,6 +19,8 @@ import {
   type RerankProvider,
 } from "./rerank.js";
 import { VERSION } from "./version.js";
+import { runDoctor } from "./doctor.js";
+import { recordRun, recordFeedback, summarizeMetrics } from "./metrics.js";
 
 /**
  * Find a --path/-p value in raw argv before commander parses anything.
@@ -75,6 +77,8 @@ program
   .option("--no-structural-boost", "disable the import-graph relevance boost")
   .option("--cache", "enable the on-disk embedding cache", cfg.cache)
   .option("--no-cache", "disable the on-disk embedding cache (always re-embed everything)")
+  .option("--log", "log this run's token usage locally, for `context-compiler stats`", cfg.logMetrics)
+  .option("--no-log", "don't log this run's token usage")
   .option(
     "--rerank",
     "add a cheap-model second pass that reviews top candidates and drops what doesn't hold up (costs extra API calls beyond embeddings)",
@@ -173,6 +177,16 @@ program
       } else {
         process.stdout.write(result.bundle);
       }
+
+      if (opts.log) {
+        recordRun(root, {
+          task: query,
+          budgetTokens,
+          tokensUsed: result.selection.totalTokens,
+          chunksIncluded: result.selection.selected.length,
+          chunksSkipped: result.selection.skipped.length,
+        });
+      }
     } catch (err) {
       console.error(`context-compiler failed: ${(err as Error).message}`);
       process.exitCode = 1;
@@ -199,6 +213,7 @@ program
         cache: true,
         rerank: false,
         rerankProvider: DEFAULT_CONFIG.rerankProvider,
+        logMetrics: true,
         // Deliberately omitted: rerankModel. Leaving it unset lets the CLI
         // pick a provider-appropriate default (gpt-4o-mini / claude-haiku-4-5)
         // at run time even if --rerank-provider is overridden on the command
@@ -235,6 +250,67 @@ program
         2
       )
     );
+  });
+
+program
+  .command("stats")
+  .description("Summarize this repo's locally logged runs -- real token usage and any recorded hit/miss feedback.")
+  .option("-p, --path <dir>", "repo root to read logs from", guessedRoot)
+  .action((opts) => {
+    const root = resolve(opts.path);
+    const summary = summarizeMetrics(root);
+
+    if (summary.totalRuns === 0) {
+      console.error("No logged runs yet in this repo. Runs are logged automatically unless you pass --no-log.");
+      return;
+    }
+
+    console.error(`Runs logged:        ${summary.totalRuns}`);
+    console.error(`Avg tokens used:    ${Math.round(summary.avgTokensUsed!)}`);
+    console.error(`Avg budget:         ${Math.round(summary.avgBudgetTokens!)}`);
+    console.error("");
+    if (summary.hitRate === null) {
+      console.error('No feedback recorded yet. After a task, run: context-compiler feedback hit|miss ["note"]');
+    } else {
+      console.error(
+        `Feedback: ${summary.feedbackHits} hit / ${summary.feedbackMisses} miss  (hit rate: ${(summary.hitRate * 100).toFixed(0)}%)`
+      );
+    }
+  });
+
+program
+  .command("feedback")
+  .description('Record whether the agent needed something beyond the last compiled bundle -- e.g. "context-compiler feedback miss \\"needed the config file too\\""')
+  .argument("<outcome>", '"hit" (the bundle had everything needed) or "miss" (the agent had to ask for more)')
+  .argument("[note]", "optional free-text note")
+  .option("-p, --path <dir>", "repo root to log against", guessedRoot)
+  .action((outcome, note, opts) => {
+    if (outcome !== "hit" && outcome !== "miss") {
+      console.error(`Expected "hit" or "miss", got "${outcome}".`);
+      process.exitCode = 1;
+      return;
+    }
+    recordFeedback(resolve(opts.path), outcome, note);
+    console.error(`Logged: ${outcome}${note ? ` (${note})` : ""}`);
+  });
+
+program
+  .command("doctor")
+  .description("Diagnose common install/MCP-connection problems and print a ready-to-run Claude Code registration command.")
+  .action(() => {
+    const report = runDoctor();
+    for (const check of report.checks) {
+      console.error(`${check.ok ? "✓" : "✗"} ${check.label}: ${check.detail}`);
+    }
+    console.error("");
+    console.error(
+      report.allOk
+        ? "All checks passed. To register this as an MCP server in Claude Code, run:"
+        : "One or more checks failed above — fix those first if possible. Either way, here's the registration command with your real paths already filled in:"
+    );
+    console.error("");
+    console.error(report.mcpAddCommand);
+    if (!report.allOk) process.exitCode = 1;
   });
 
 function resolveProvider(name: string): EmbeddingProvider {

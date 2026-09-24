@@ -122,6 +122,16 @@ export { formatBundle, type BundleMeta } from "./output.js";
 export { FakeEmbeddingProvider, OpenAIEmbeddingProvider, type EmbeddingProvider } from "./embeddings.js";
 export { buildImportGraph, buildImportGraphRegex, ImportGraph } from "./importGraph.js";
 export { buildAstImportGraph } from "./astImportGraph.js";
+export { loadPathAliases, aliasCandidates, type PathAliasMap } from "./pathAliases.js";
+export { runDoctor, type DoctorReport, type DoctorCheck } from "./doctor.js";
+export {
+  recordRun,
+  recordFeedback,
+  readMetrics,
+  summarizeMetrics,
+  type MetricEntry,
+  type MetricsSummary,
+} from "./metrics.js";
 export {
   FakeRerankProvider,
   OpenAIRerankProvider,

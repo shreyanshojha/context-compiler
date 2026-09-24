@@ -16,6 +16,7 @@ describe("handleCompileContextTool", () => {
         query: "fix the login authentication bug",
         budgetTokens: 500,
         useCache: false,
+        logMetrics: false,
       },
       new FakeEmbeddingProvider()
     );
@@ -35,6 +36,7 @@ describe("handleCompileContextTool", () => {
         pin: ["src/auth.ts"],
         ignore: ["README.md"],
         useCache: false,
+        logMetrics: false,
       },
       new FakeEmbeddingProvider()
     );
@@ -50,6 +52,7 @@ describe("handleCompileContextTool", () => {
         query: "anything",
         budgetTokens: 1000,
         useCache: false,
+        logMetrics: false,
       },
       new FakeEmbeddingProvider()
     );
@@ -61,7 +64,7 @@ describe("handleCompileContextTool", () => {
   it("applies default budgetTokens and useCache when omitted", async () => {
     const result = await handleCompileContextTool(
       // @ts-expect-error - intentionally omitting optional fields to exercise zod defaults
-      { path: FIXTURE_ROOT, query: "login" },
+      { path: FIXTURE_ROOT, query: "login", logMetrics: false },
       new FakeEmbeddingProvider()
     );
     expect(result.content[0].text).toContain("Token budget:** 8000");
@@ -74,6 +77,7 @@ describe("handleCompileContextTool", () => {
         query: "fix the login authentication bug",
         budgetTokens: 8000,
         useCache: false,
+        logMetrics: false,
         rerank: true,
         rerankModel: "gpt-4o-mini",
       },
@@ -85,7 +89,7 @@ describe("handleCompileContextTool", () => {
 
   it("does not rerank when rerank is false (the default)", async () => {
     const result = await handleCompileContextTool(
-      { path: FIXTURE_ROOT, query: "fix the login authentication bug", budgetTokens: 8000, useCache: false },
+      { path: FIXTURE_ROOT, query: "fix the login authentication bug", budgetTokens: 8000, useCache: false, logMetrics: false },
       new FakeEmbeddingProvider(),
       new FakeRerankProvider()
     );

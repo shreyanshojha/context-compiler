@@ -4,13 +4,16 @@ This is the full technical record from building and stress-testing context-compi
 
 ## Automated test suite
 
-116 tests across 15 files, all offline (no API keys or network required) except where noted (Round 7 below additionally validates the pipeline against real OpenAI and Anthropic API keys, outside the automated suite):
+146 tests across 19 files, all offline (no API keys or network required) except where noted (Round 7 below additionally validates the pipeline against real OpenAI and Anthropic API keys, outside the automated suite):
 
 - `walker.test.ts`, `chunker.test.ts`, `astChunker.test.ts`, `budget.test.ts`, `output.test.ts`, `cache.test.ts`, `config.test.ts` — core pipeline stages. `astChunker.test.ts` covers per-method/per-field chunking of oversized classes specifically: decorators staying attached to the member they decorate, private fields, static init blocks, computed method names, generators, getters/setters, abstract classes, anonymous class expressions, TS overload groups, and Python nested classes.
 - `embeddings.test.ts` — fake provider determinism/similarity behavior; `OpenAIEmbeddingProvider`/`VoyageEmbeddingProvider` clear-error-without-key checks; a mocked-network test that verifies the *actual* HTTP request `VoyageEmbeddingProvider` sends (endpoint, auth header, model, response re-ordering) without needing a real key.
 - `rerank.test.ts` — `FakeRerankProvider` keyword-overlap logic (including a camelCase-splitting regression, see below); `OpenAIRerankProvider`/`AnthropicRerankProvider` clear-error-without-key checks; a mocked-network test that verifies the actual model string `AnthropicRerankProvider` sends to the Anthropic SDK (see the model-selection bug below); `applyRerank`'s topN bounding and explain-attaching behavior.
-- `importGraph.test.ts` — the AST-based import graph (see below): real cross-file connections in TS and Python, a real regression test proving the AST path ignores a `require(...)` mentioned only in a comment/string (where the old regex fallback gets it wrong on the same fixture), and Python's bare relative-import edge case (`from . import helpers`).
-- `ranker.test.ts`, `mcpServer.test.ts`, `cli.test.ts` (end-to-end via the actual CLI binary) — integration coverage, including config-file/CLI-flag precedence and clear-error paths for every provider combination.
+- `importGraph.test.ts`, `pathAliases.test.ts` — the AST-based import graph (see below): real cross-file connections in TS and Python, a real regression test proving the AST path ignores a `require(...)` mentioned only in a comment/string (where the old regex fallback gets it wrong on the same fixture), Python's bare relative-import edge case (`from . import helpers`), tsconfig path-alias resolution, and barrel re-export chain following.
+- `packaging.test.ts` — both bin entries (`cli.js`, `mcpServer.js`) carry the required shebang, checked at the source level so it can't silently regress (see Round 10).
+- `doctor.test.ts` — the `doctor` self-diagnostic against injectable fixture directories: a correctly-built dist passes every check, a missing shebang is caught (the actual Round 10 bug, reproduced as a fixture rather than re-described), an old Node version is flagged, and an API key's *presence* is reported without its value ever appearing in the report.
+- `metrics.test.ts` — local usage-metrics logging: appending/reading JSONL entries, summarizing runs and feedback into a hit rate, tolerating a corrupted line, and never throwing on a write failure.
+- `ranker.test.ts`, `mcpServer.test.ts`, `cli.test.ts` (end-to-end via the actual CLI binary) — integration coverage, including config-file/CLI-flag precedence, clear-error paths for every provider combination, and the `stats`/`feedback`/`doctor` commands end-to-end.
 
 Run with `npm test`.
 
@@ -100,6 +103,38 @@ Found live, on the user's own Mac, during real end-to-end usage (not a synthetic
 
 Fixed by giving every `EmbeddingProvider` a `namespace` identifying its provider+model (`"openai:text-embedding-3-small"`, `"voyage:voyage-code-3"`, `"fake"`), and folding that into the cache's hash key alongside the content hash, so a vector is only ever reused for the exact provider+model that produced it. A provider/model change now costs a handful of extra embedding calls for previously-cached text -- never a crash. The on-disk cache format version was bumped (1 -> 2) so a cache file written before this fix is discarded cleanly on load rather than partially matching under the new key scheme. Two regression tests added: one proving a shared cache file never hands a text's vector from one provider/model to a different one, and one proving an old version-1 cache file is treated as empty rather than misread.
 
+### Round 10 -- shipping it for real: npm publish + Claude Code MCP registration on a real machine (two real bugs found and fixed)
+
+Every round above tests the ranking/chunking pipeline. None of them test whether the package actually installs and runs for a real end user -- a completely different failure surface, and this round hit two real bugs in it.
+
+**Bug: missing shebang silently broke the MCP server's launch.** After a real `npm publish` and `npm install -g`, Claude Code reported `context-compiler: ✗ Failed to connect` with no further detail. Root-caused by direct comparison: `src/cli.ts` started with `#!/usr/bin/env node`; `src/mcpServer.ts` did not. `context-compiler --version` worked fine regardless (it doesn't rely on being launched as a standalone executable the same way), which is exactly why this hid as long as it did -- one bin entry worked, so the install looked healthy. Fixed by adding the shebang, and locked in with `test/packaging.test.ts` (checks both bin entries at the source level, so this can't silently regress again regardless of what the build step does).
+
+**Bug: Claude Code's spawn environment excludes `nvm`'s directories from `PATH`.** Even after the shebang fix and pointing Claude Code at the binary's *absolute path*, it still failed to connect. Reproduced directly rather than guessed at:
+
+```
+$ env -i PATH="/usr/bin:/bin" ./dist/mcpServer.js < /dev/null
+/usr/bin/env: 'node': No such file or directory
+exit code: 127
+
+$ env -i PATH="/usr/bin:/bin" "$(which node)" dist/mcpServer.js < /dev/null
+exit code: 0
+```
+
+A `#!/usr/bin/env node` shebang still needs `node` resolvable via `PATH` at launch time -- even when the script itself is given by absolute path. Claude Code spawns MCP servers with a minimal environment that, for an `nvm`-managed install, doesn't include `nvm`'s own directories on `PATH`. The fix that actually holds: point the MCP config's `command` at the *resolved node binary itself*, bypassing the shebang lookup entirely -- not at the script's path. Verified connected end-to-end afterward (`claude mcp list` → `✓ Connected`). This is exactly the failure mode `context-compiler doctor` (added in Round 11) now catches automatically.
+
+A secondary, non-code friction point from the same publish: a version can appear to publish successfully client-side but never actually go live if a two-factor prompt mid-publish goes unanswered, permanently blocking republish of that exact version number (`409 Conflict - Cannot publish over previously staged version`). No code fix possible for this one -- resolved by cutting a clean new version number.
+
+### Round 11 -- self-diagnosis, real usage metrics, and closing the import-graph's two documented gaps
+
+Follow-up work after Round 10, aimed at the two things that round exposed: nothing in the tool itself could have told the user what was wrong, and the project's own PRD-defined v1 success metric (token usage + "miss rate" per real task) had been sitting at "not yet measured" since day one because nothing logged it.
+
+- **`context-compiler doctor`** — checks Node version, both bin entries' shebang and executable bit, and which `node` is actually running, then prints a ready-to-paste `claude mcp add` command with real paths filled in. Tested against injectable fixture directories (not the real dist/) so the exact Round 10 bug (a missing shebang) is reproduced as a fixture and asserted caught, rather than just re-described in prose.
+- **Local usage-metrics logging** (`stats` / `feedback` commands) — every run logs its token usage to a local, gitignored, walker-excluded `.context-compiler-metrics.jsonl` (same treatment as the embedding cache); `feedback hit|miss` records the "miss rate" half of the metric, since the tool has no automatic way to know whether an agent needed more than it was given.
+- **tsconfig/jsconfig path-alias resolution** — the import graph previously only resolved genuinely relative specifiers (`./foo`, `../bar`); a bare alias like `@/utils` (extremely common in real bundler-based repos) never resolved to anything. Now reads `compilerOptions.baseUrl`/`paths` from the same config a real bundler uses (best-effort JSONC parsing, since real tsconfig files often have comments), and falls back to no aliases (not a failed run) if the config can't be parsed at all.
+- **Barrel re-export chain following** — `export * from './x'` created a direct edge to `x`, but a *consumer* of the barrel only connected to the barrel file itself, one hop short of `x` -- and the ranker's structural boost only checks direct edges. Fixed by computing each barrel's transitive re-export closure (cycle-safe) and connecting every consumer of a barrel to everything it ultimately re-exports, however many barrels deep.
+
+All four are covered by dedicated tests (`doctor.test.ts`, `metrics.test.ts`, `pathAliases.test.ts`, and new cases in `importGraph.test.ts`), and the full suite (146 tests) passes with no regressions to the Round 1-9 numbers above.
+
 ## The AST-based import graph (tree-sitter)
 
 The structural-boost import graph originally used a regex scan for import/require statements. That's a real limitation: a regex has no idea whether `require(...)`-shaped text is inside a comment, a string, or a function that merely happens to be named `require` — it will connect files based on any of those.
@@ -148,7 +183,8 @@ The compiled-bundle cost stays flat near the configured budget regardless of rep
 
 ## Known limitations
 
-- The import graph still misses bundler path aliases (e.g. `@/utils`) and barrel re-export chains, and only covers JS/TS/TSX/Python — it's a ranking nudge, not a full dependency-analysis tool.
+- The import graph resolves tsconfig/jsconfig path aliases and follows barrel re-export chains (see Round 11), but still only covers JS/TS/TSX/Python and doesn't resolve dynamic/computed import paths — it's a ranking nudge, not a full dependency-analysis tool.
+- No self-diagnostic existed for install/MCP-connection problems until Round 11's `doctor` command — before that, a packaging or PATH-resolution issue (Round 10) had to be root-caused by hand.
 - Rerank is opt-in and costs real API calls beyond embeddings — deliberately not defaulted on.
 - Chunk-size thresholds (`wholeFileLineThreshold`, `windowLines`) are still line-count-based, not token-based -- but a token-aware safety net now backs them (see Round 8: `maxChunkTokens`, 8000 by default), so a pathologically long line no longer slips through as a giant chunk.
 - A chunk sub-split purely by token count (the `maxChunkTokens` safety net) doesn't track exact character offsets within its parent line the way ordinary line-based splitting does -- every such sub-chunk reports the same `startLine`/`endLine` as its parent. Accepted tradeoff for what's a rare-input safety net, not the common path.

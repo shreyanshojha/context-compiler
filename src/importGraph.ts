@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, join, normalize, relative } from "node:path";
 import { buildAstImportGraph } from "./astImportGraph.js";
+import { loadPathAliases, aliasCandidates, type PathAliasMap } from "./pathAliases.js";
 
 /**
  * A file-level, undirected adjacency graph built from static import/require
@@ -67,6 +68,7 @@ export async function buildImportGraph(root: string, relPaths: string[]): Promis
 export function buildImportGraphRegex(root: string, relPaths: string[]): ImportGraph {
   const graph = new ImportGraph();
   const knownFiles = new Set(relPaths);
+  const aliasMap = loadPathAliases(root);
 
   for (const relPath of relPaths) {
     const ext = extname(relPath);
@@ -81,7 +83,7 @@ export function buildImportGraphRegex(root: string, relPaths: string[]): ImportG
 
     const specifiers = ext === ".py" ? extractPythonImports(text) : extractJsImports(text);
     for (const spec of specifiers) {
-      const resolved = resolveImport(relPath, spec, knownFiles);
+      const resolved = resolveImport(relPath, spec, knownFiles, aliasMap);
       if (resolved) graph.addEdge(relPath, resolved);
     }
   }
@@ -114,7 +116,12 @@ function extractPythonImports(text: string): string[] {
  */
 const CANDIDATE_EXTS = ["", ".ts", ".tsx", ".js", ".jsx", ".py", "/index.ts", "/index.js"];
 
-function resolveImport(fromFile: string, specifier: string, knownFiles: Set<string>): string | null {
+function resolveImport(
+  fromFile: string,
+  specifier: string,
+  knownFiles: Set<string>,
+  aliasMap: PathAliasMap | null
+): string | null {
   const bases: string[] = [];
 
   if (specifier.startsWith(".") || specifier.startsWith("/")) {
@@ -122,10 +129,12 @@ function resolveImport(fromFile: string, specifier: string, knownFiles: Set<stri
     bases.push(normalize(join(dirname(fromFile), specifier)));
   } else {
     // Not a relative path — could be a bare package ("react", "os", never
-    // resolvable) or a Python-style absolute local import ("pyutils/helpers"
-    // after dot-to-slash conversion). Try it from the repo root; it simply
-    // won't match anything for genuine external packages.
+    // resolvable), a tsconfig-aliased specifier ("@/utils"), or a
+    // Python-style absolute local import ("pyutils/helpers" after
+    // dot-to-slash conversion). Try the repo-root interpretation and every
+    // matching alias pattern; a genuine external package won't match either.
     bases.push(normalize(specifier));
+    bases.push(...aliasCandidates(specifier, aliasMap).map(normalize));
   }
 
   for (const base of bases) {
